@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         HubSpot lydfiks
 // @namespace    dvalencia
-// @version      1.0
+// @version      1.1
 // @description  Bytter Twilio-ringelyder og jevner ut samtalelyden (kompressor + limiter) i HubSpot calling
 // @match        https://app.hubspot.com/*
 // @match        https://app-eu1.hubspot.com/*
@@ -52,6 +52,17 @@
   let ctx;
   const processed = new WeakSet();
 
+  const getCtx = () => (ctx = ctx || new AudioContext());
+
+  // Lås opp lydmotoren ved første klikk/tastetrykk (nettleserne krever en brukerhandling)
+  const unlock = () => {
+    const c = getCtx();
+    if (c.state !== 'running') c.resume().catch(() => {});
+  };
+  ['pointerdown', 'keydown'].forEach((ev) =>
+    window.addEventListener(ev, unlock, { capture: true, passive: true })
+  );
+
   const apply = (node, params) => {
     for (const [k, v] of Object.entries(params)) node[k].value = v;
     return node;
@@ -61,20 +72,31 @@
     if (!stream || processed.has(stream) || stream.getAudioTracks().length === 0) return;
     processed.add(stream);
 
-    ctx = ctx || new AudioContext();
-    if (ctx.state === 'suspended') ctx.resume();
-
-    const src = ctx.createMediaStreamSource(stream);
-    const comp = apply(ctx.createDynamicsCompressor(), COMPRESSOR);
-    const gain = ctx.createGain();
+    const c = getCtx();
+    const src = c.createMediaStreamSource(stream);
+    const comp = apply(c.createDynamicsCompressor(), COMPRESSOR);
+    const gain = c.createGain();
     gain.gain.value = MAKEUP_GAIN;
-    const lim = apply(ctx.createDynamicsCompressor(), LIMITER);
+    const lim = apply(c.createDynamicsCompressor(), LIMITER);
+    src.connect(comp).connect(gain).connect(lim).connect(c.destination);
 
-    src.connect(comp).connect(gain).connect(lim).connect(ctx.destination);
+    // Demp originalen KUN når kompressoren faktisk spiller – ellers blir det stille
+    const activate = () => {
+      if (c.state === 'running') {
+        el.muted = true;
+        log('Kompressor aktiv på samtalelyd');
+        return true;
+      }
+      return false;
+    };
 
-    // Elementet må beholde strømmen (ellers stopper WebRTC-lyden i Chrome), men dempes
-    el.muted = true;
-    log('Kompressor aktiv på samtalelyd');
+    if (!activate()) {
+      log('Lydmotor i pause – spiller vanlig lyd til den starter');
+      c.resume().catch(() => {});
+      c.addEventListener('statechange', function handler() {
+        if (activate()) c.removeEventListener('statechange', handler);
+      });
+    }
   }
 
   const desc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'srcObject');
